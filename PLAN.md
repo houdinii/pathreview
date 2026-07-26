@@ -19,6 +19,10 @@ a missing header returns `401 "Not authenticated"`; malformed, expired, and wron
 return `401 "Invalid authentication credentials"`. A successful fix is those behaviors captured as
 integration tests, plus the first integration-test pattern for this repo.
 
+**Root cause:** No integration test imports or exercises `get_current_user`, so its four `401`
+rejection branches (`api/middleware/auth.py`) are untested — and `tests/integration/` has no fixture
+infrastructure to exercise them.
+
 ### Map
 
 This issue (manifest **E-15**) is scoped to a single new file. Files involved:
@@ -60,6 +64,35 @@ This issue (manifest **E-15**) is scoped to a single new file. Files involved:
 - **Outputs:** `httpx.Response` objects. Tests assert on `response.status_code` (always `401`) and
   `response.json()["detail"]` (the exact message per case). **No production code changes** — this is
   test-only; no function signature or runtime behavior is modified.
+
+**Test I'll write (drafted in advance, malformed case shown):**
+
+```python
+import pytest
+from fastapi.testclient import TestClient
+
+from api.main import app
+
+
+@pytest.fixture
+def client() -> TestClient:
+    return TestClient(app)
+
+
+@pytest.mark.integration
+class TestAuthMiddlewareRejections:
+    @pytest.mark.parametrize("bad_token", ["not.a.jwt", "a.b", "aaa.bbb.ccc"])
+    def test_malformed_token_returns_401(self, client: TestClient, bad_token: str) -> None:
+        """Test a malformed token returns 401 'Invalid authentication credentials'."""
+        response = client.get("/reviews", headers={"Authorization": f"Bearer {bad_token}"})
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid authentication credentials"
+```
+
+The other three cases follow the same shape: missing-header sends no `Authorization` header and
+asserts `"Not authenticated"`; expired uses `create_access_token(..., expires_delta=timedelta(
+minutes=-5))`; wrong-secret uses `jwt.encode(..., "wrong-secret", ...)`. Drafting this first defines
+"done" — the fixture wiring and the exact assertion — before implementation.
 
 ### Risks & unknowns
 

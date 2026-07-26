@@ -17,3 +17,24 @@ I did notice that there are no integration tests whatsoever and conftest.py has 
 **Branch name:** test/90-auth-middleware-edge-cases
 **Setup confirmation:** [x] App runs locally at localhost:5173
 **Cohort ledger:** [x] Issue added to cohort ledger
+
+## Week 8 — Reproduction & solution planning
+
+**Reproduction commit link:** https://github.com/houdinii/pathreview/commit/968fd45c59b5e328a861136cf41a95b1933410c4
+
+**Reproduction summary:**
+This is a test-coverage gap rather than a runtime bug, so I reproduced it by proving the rejection
+paths have no coverage today: a grep for `get_current_user` across `tests/` exits 1 (zero hits) and
+`tests/integration/` holds only `__init__.py`. I then confirmed the current behavior of each case by
+probing the protected `GET /reviews` route — a missing header returns 401 "Not authenticated", while
+malformed, expired, and wrong-secret tokens all return 401 "Invalid authentication credentials". The
+reproduction commit adds four skipped test stubs naming those cases and documents the confirmed
+behavior in its message.
+
+**PLAN.md link:** https://github.com/houdinii/pathreview/blob/test/90-auth-middleware-edge-cases/PLAN.md
+
+**Blockers or open questions:**
+None blocking. One boundary I am tracking: issue E-04 ("Authentication middleware doesn't validate
+token expiry") may later change the expired-token message from the generic 401 to "Token has
+expired", which would require updating my expired-token assertion. I test the current behavior and
+note the dependency rather than coupling the two tickets.
