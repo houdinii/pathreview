@@ -84,7 +84,7 @@ disposing the pool on fixture entry resolved it.
 
 ### Check-in 2 (end of week)
 
-**PR link:** «FILL: paste the https://github.com/ascherj/pathreview/pull/NNN URL after opening»
+**PR link:** https://github.com/ascherj/pathreview/pull/601
 
 **Branch:** `test/90-auth-middleware-edge-cases`
 
