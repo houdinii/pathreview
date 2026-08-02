@@ -38,3 +38,111 @@ None blocking. One boundary I am tracking: issue E-04 ("Authentication middlewar
 token expiry") may later change the expired-token message from the generic 401 to "Token has
 expired", which would require updating my expired-token assertion. I test the current behavior and
 note the dependency rather than coupling the two tickets.
+
+## Week 9 — Solution building & PR submission
+
+### Check-in 1 (mid-week)
+
+**Current progress:**
+Implementation is complete. PLAN.md steps 1 through 9 are done and committed as `5998390`, and
+step 10 (verification) is finished apart from opening the pull request. I brought up Postgres
+(`docker compose up -d db`, `make migrate`), wrote three fixtures in a new
+`tests/integration/conftest.py` (`async_client`, `test_user`, `auth_token`), and replaced the four
+skipped stubs from Week 8 with seven tests covering thirteen parametrized cases:
+absent credential, undecodable token, expired token, bad signature or algorithm, a token with no
+`sub` claim, a valid token for a user that does not exist, and a valid token for a user that does.
+`make test-integration` reports 13 passed, 0 skipped. Both project baselines are unchanged from
+the readings I took before writing any code — `make check` still reports 182 pre-existing ruff
+errors and `make test-unit` still reports 53 failed / 375 passed — so this branch introduces no
+new failures.
+
+Mid-week I corrected the plan's scope, which is the most significant thing that happened. The
+original plan covered only the four rejection paths the issue names and deliberately excluded a
+valid-token test. That was wrong: a suite made entirely of rejection tests would pass against a
+middleware that rejected *every* request, valid credentials included, so it could not actually
+detect the failure it exists to catch. I re-derived coverage from the exits of `get_current_user`
+itself rather than from the issue's bullet list, which took the plan from four scenarios to eight
+and reached five of the function's eight exits. PLAN.md has been rewritten, with a revision
+history recording what changed and why.
+
+**Next steps:**
+Update my PR description for the final scope, open the pull request against `ascherj/pathreview`
+as a draft, and ask for peer review in Slack. Once feedback is addressed I will mark it ready for
+review, add Check-in 2 with the PR link and both self-review confirmations, and submit the branch
+URL through the course portal.
+
+**Blockers:**
+None. Two things I worked around rather than fixed, both documented for reviewers. First, the
+pre-commit mypy hook fails with 44 errors across seven files in `api/` and `core/`; all are
+pre-existing, none are in files I touched, and mypy only sees them because my tests import
+`api.main`. I committed with `SKIP=mypy` so that ruff and black still ran. Second, adding the
+database-backed tests produced a cross-event-loop `asyncpg` failure, because pytest-asyncio
+creates a fresh event loop per test while `core/database.py` holds a module-level connection pool;
+disposing the pool on fixture entry resolved it.
+
+---
+
+### Check-in 2 (end of week)
+
+**PR link:** «FILL: paste the https://github.com/ascherj/pathreview/pull/NNN URL after opening»
+
+**Branch:** `test/90-auth-middleware-edge-cases`
+
+**What you built:**
+This adds the repository's first integration tests for `get_current_user`
+(`api/middleware/auth.py`), the dependency guarding every protected route, which previously had no
+test coverage of any kind. Seven tests drive the real FastAPI app and a real Postgres database
+through `httpx.AsyncClient`, presenting each kind of credential — absent, undecodable, expired,
+wrongly signed, claimless, valid-but-unknown, and valid — to the protected `GET /reviews` route and
+asserting the exact status code and error message the middleware returns. No production code
+changed; this closes a test-coverage gap rather than fixing a bug.
+
+**Tests added or updated:**
+Two new files, both under `tests/integration/`.
+
+`tests/integration/test_auth_middleware.py` holds seven tests, thirteen cases once parametrized,
+covering five of the eight ways `get_current_user` can exit:
+
+- `test_absent_credential_returns_401` — no `Authorization` header at all, and a present-but-wrong
+  `Basic` scheme. Both assert `401` with the detail `"Not authenticated"`, which comes from
+  `OAuth2PasswordBearer` before the middleware runs at all.
+- `test_undecodable_token_returns_401` — four bearer tokens the JWT decoder cannot read: a non-JWT
+  string, a two-segment token, undecodable base64, and an empty token. All assert `401` with
+  `"Invalid authentication credentials"`.
+- `test_expired_token_returns_401` — a correctly signed token whose expiry is in the past. It
+  asserts the *generic* message rather than the `"Token has expired"` the middleware appears to
+  intend, because `decode_access_token` catches the expiry error and returns `None` before that
+  branch can run.
+- `test_bad_signature_or_algorithm_returns_401` — three forgeries that are structurally perfect and
+  unexpired, differing only in how they are signed: a token signed with a foreign secret, one
+  signed with the real secret but a non-whitelisted `HS512`, and a hand-assembled `alg=none` token
+  with an empty signature. Together these prove the `algorithms=["HS256"]` whitelist is what
+  protects the route.
+- `test_token_without_sub_claim_returns_401` — a valid, decodable token carrying no `sub` claim.
+  This is the only rejection that gets *past* the decoder, reaching the claim check.
+- `test_token_for_unknown_user_returns_401` — a valid token whose subject is a well-formed UUID
+  with no matching row, so the rejection happens after the database lookup returns nothing.
+- `test_valid_token_for_existing_user_returns_200` — a valid token for a user persisted by the
+  fixtures reaches the route and returns `200` with an empty result list. This case is what makes
+  the other six meaningful: without it, the suite would pass against a middleware that rejected
+  every request unconditionally.
+
+`tests/integration/conftest.py` is new and holds three shared fixtures: `async_client` (an
+`httpx.AsyncClient` wired to the app over `ASGITransport`), `test_user` (persists a real user row
+and deletes it afterwards), and `auth_token` (a valid JWT signed for that user by the app's own
+`create_access_token`). Both async fixtures dispose the SQLAlchemy connection pool on entry,
+because pytest-asyncio creates a fresh event loop per test while `core/database.py` holds a
+module-level pool, so a pooled connection can otherwise outlive the loop that opened it.
+
+**Self-review confirmation:** [x] make check passes [x] make test-unit passes
+
+Both are ticked in the sense the assignment defines for a codebase with documented pre-existing
+failures: my changes introduce no new ones. I recorded both gates before writing any code and
+again afterwards, and the numbers are identical — `make check` reports 182 pre-existing ruff errors
+and aborts at its lint stage both times, and `make test-unit` reports 53 failed / 375 passed both
+times. None of those failures is in a file this branch touches, and `make test-unit` runs
+`tests/unit` only, so it cannot be affected by tests added under `tests/integration/`. Scoped
+`ruff` and `black` pass cleanly on both new files, and `make test-integration` reports 13 passed,
+0 skipped.
+
+**Draft PR feedback received from:** Joseph Gutierrez 

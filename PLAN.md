@@ -2,132 +2,162 @@
 
 **Issue:** Add integration tests for authentication edge cases — https://github.com/ascherj/pathreview/issues/90
 
+> **Revised 2026-08-01.** The original plan (2026-07-26) scoped this to four rejection paths and
+> excluded happy-path coverage. That was wrong, and the revision history at the bottom of this
+> file records why. The plan below is the one being implemented.
+
 ### Understand
 
-The root cause is a **test-coverage gap, not a code bug**: no test in the repository exercises
-`get_current_user` (`api/middleware/auth.py`). A `grep` for the middleware across `tests/` exits
-`1` (zero hits) and `tests/integration/` contains only `__init__.py`, so the middleware is only
-ever exercised implicitly through the happy path.
+The issue states that "the auth middleware is tested with a valid token but there are no tests
+for" four rejection cases. The premise is false. No test in the repository references
+`get_current_user` at all — a `grep` across `tests/` returns zero hits, and `tests/integration/`
+contained only `__init__.py`. What exists is `tests/unit/test_security.py`, which tests the JWT
+helpers (`create_access_token`, `decode_access_token`) in isolation. Those prove the decoder
+returns `None` for bad input; nothing proves the middleware refuses entry to a protected route
+when it does.
 
-- **Expected:** each way of presenting a bad credential to a protected route returns `401`, and
-  that behavior is pinned by an automated test that fails if the middleware ever stops rejecting it.
-- **Actual:** the four rejection paths (missing header, malformed token, expired token, wrong-secret
-  token) have no coverage, so a regression that let unauthorized requests through would pass silently.
+So the real gap is wider than the issue describes: `get_current_user` has no coverage at all,
+neither its rejection paths nor its success path.
 
-I confirmed today's behavior by probing `GET /reviews` (a route guarded by `get_current_user`):
-a missing header returns `401 "Not authenticated"`; malformed, expired, and wrong-secret tokens all
-return `401 "Invalid authentication credentials"`. A successful fix is those behaviors captured as
-integration tests, plus the first integration-test pattern for this repo.
+- **Expected:** each way of presenting a credential to a protected route, good or bad, is pinned
+  by a test that fails if the middleware's behavior changes.
+- **Actual:** none of it is covered. A regression letting unauthorized requests through would pass
+  silently, and so would one rejecting every request.
 
-**Root cause:** No integration test imports or exercises `get_current_user`, so its four `401`
-rejection branches (`api/middleware/auth.py`) are untested — and `tests/integration/` has no fixture
-infrastructure to exercise them.
+That second failure mode is why rejection-only testing is insufficient: a middleware replaced with
+an unconditional `raise HTTPException(401)` would satisfy every rejection test. The success path is
+what gives the rejection tests meaning.
+
+**Root cause:** No test exercises `get_current_user` (`api/middleware/auth.py`), and
+`tests/integration/` has no fixture infrastructure with no app client, no persisted user, no token.
 
 ### Map
 
-This issue (manifest **E-15**) is scoped to a single new file. Files involved:
-
-- `tests/integration/test_auth_middleware.py` — **the only file changed.** Holds a module-level
-  `client` fixture (`TestClient(app)`) and the four rejection tests grouped in
-  `TestAuthMiddlewareRejections`. Kept self-contained (no `conftest.py` change) because the issue
-  scopes to one file and the rejection paths need no shared fixtures.
+- `tests/integration/conftest.py` *new* - Shared fixtures: an `async_client`
+  (`httpx.AsyncClient` over `ASGITransport`), a `test_user` that persists a real row and removes it
+  afterwards, and an `auth_token` signing a valid JWT for that user with the app's own helper.
+- `tests/integration/test_auth_middleware.py` — **the test module.** Seven tests, thirteen
+  parametrized cases.
 - Read-only references (not edited):
-  - `api/middleware/auth.py` — `get_current_user`; the four 401 branches under test.
-  - `core/security.py` — `create_access_token` / `decode_access_token`; used to forge the test JWTs.
-  - `api/routes/reviews.py` — `GET /reviews`, the protected route the tests hit.
-  - `api/main.py` — the `app` object the `TestClient` wraps.
+  - `api/middleware/auth.py` — `get_current_user`, the subject.
+  - `core/security.py` — `create_access_token` / `decode_access_token`; used to forge test JWTs.
+  - `core/database.py` — `get_db`, `AsyncSessionLocal`; the session the fixtures write through.
+  - `core/models/user.py` — the `User` row the happy path needs.
+  - `api/routes/reviews.py` — `GET /reviews`, the protected route under test.
+  - `api/main.py` — the `app` the clients wrap.
+  - `.venv/.../fastapi/security/oauth2.py` — `OAuth2PasswordBearer.__call__`, which owns the
+    `"Not authenticated"` response *before* `get_current_user` runs.
 
 ### Plan
 
-1. Add a module-level `client` fixture returning `TestClient(app)`. No `get_db` override is needed —
-   the four rejection paths raise before the DB lookup at `auth.py:58`.
-2. **Missing header** → request `GET /reviews` with no `Authorization` header; assert `401` and
-   `detail == "Not authenticated"`. Parametrize the "absent credential" variants: wrong scheme
-   (`Basic ...`) and an empty `Bearer` token.
-3. **Malformed token** → send junk bearer tokens (non-JWT string, wrong segment count, undecodable
-   base64) via `@pytest.mark.parametrize`; assert `401` and `detail == "Invalid authentication
-   credentials"`.
-4. **Expired token** → forge one with `create_access_token(..., expires_delta=timedelta(minutes=-5))`;
-   assert `401` and, specifically, `detail == "Invalid authentication credentials"` — pinning the
-   generic message, not `"Token has expired"`.
-5. **Wrong-secret token** → sign a structurally valid JWT with a different secret (and an
-   algorithm-confusion variant, e.g. `alg=none`/`HS512`); assert `401`.
-6. Run scoped checks green on the new file only: `ruff check`, `black`, `mypy`, and
-   `pytest tests/integration/test_auth_middleware.py`.
+Coverage is derived from the exits of `get_current_user`, not only from the issue's bullet list.
+Enumerating them (full trace in `personal/TRACE_AUTH_REQUEST.md`) gives eight; five are reachable
+without simulating infrastructure failure. The three uncovered are out of scope for this specific issue and will require additional issues to be resolved.
+
+1. **Bring up real infrastructure.** `docker compose up -d db`, `make migrate`. The
+   `integration` marker is defined in `pyproject.toml:87` as *"require Docker services"*, so these
+   tests use a real Postgres rather than a stubbed session.
+2. **Build the fixtures** in `tests/integration/conftest.py`: `async_client`, `test_user`,
+   `auth_token`.
+3. **Exit 1 — absent credential** → `401 "Not authenticated"`. Parametrized: no `Authorization`
+   header, and a non-`Bearer` scheme (`Basic ...`).
+4. **Exit 2 — undecodable token** → `401 "Invalid authentication credentials"`. Parametrized:
+   `not.a.jwt`, `a.b`, `aaa.bbb.ccc`, and the empty string (`Authorization: Bearer ` with no token).
+5. **Exit 2 — expired token** → same generic message. Forged with
+   `create_access_token(..., expires_delta=timedelta(minutes=-5))`.
+6. **Exit 2 — bad signature or algorithm** → same generic message. Parametrized: a JWT signed with
+   a foreign secret; one signed with the *correct* secret but `HS512`; and a hand-assembled
+   `alg=none` forgery, which `jose.encode` refuses to build and which must therefore be
+   constructed from base64 segments the way an attacker would.
+7. **Exit 3 — valid token, no `sub` claim** → same generic message. The only rejection that gets
+   *past* `decode_access_token`, raising at `auth.py:40-41`.
+8. **Exit 7 — valid token for a user that does not exist** → same generic message, raised at
+   `auth.py:68-69` after the database query returns nothing. Requires the database.
+9. **Exit 8 — happy path.** A valid token for a persisted user returns `200`. Requires the
+   database and the `test_user` fixture.
+10. **Verify and document.** Scoped `black` / `ruff` on the new files; `make test-integration`
+    green with zero skips; `make check` and `make test-unit` compared against the pre-change
+    baseline (182 lint errors; 53 failed / 375 passed) to confirm no new failures.
 
 ### Inputs & outputs
 
-- **Inputs:** crafted JWTs and raw header strings. Valid-but-bad tokens are built with
-  `core.security.create_access_token` (expired case) and `jose.jwt.encode` with a foreign secret
-  (wrong-secret case); malformed and missing-header cases are plain strings. All are delivered as the
-  `Authorization` header on `GET /reviews` through a `TestClient`.
-- **Outputs:** `httpx.Response` objects. Tests assert on `response.status_code` (always `401`) and
-  `response.json()["detail"]` (the exact message per case). **No production code changes** — this is
-  test-only; no function signature or runtime behavior is modified.
-
-**Test I'll write (drafted in advance, malformed case shown):**
-
-```python
-import pytest
-from fastapi.testclient import TestClient
-
-from api.main import app
-
-
-@pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
-
-
-@pytest.mark.integration
-class TestAuthMiddlewareRejections:
-    @pytest.mark.parametrize("bad_token", ["not.a.jwt", "a.b", "aaa.bbb.ccc"])
-    def test_malformed_token_returns_401(self, client: TestClient, bad_token: str) -> None:
-        """Test a malformed token returns 401 'Invalid authentication credentials'."""
-        response = client.get("/reviews", headers={"Authorization": f"Bearer {bad_token}"})
-        assert response.status_code == 401
-        assert response.json()["detail"] == "Invalid authentication credentials"
-```
-
-The other three cases follow the same shape: missing-header sends no `Authorization` header and
-asserts `"Not authenticated"`; expired uses `create_access_token(..., expires_delta=timedelta(
-minutes=-5))`; wrong-secret uses `jwt.encode(..., "wrong-secret", ...)`. Drafting this first defines
-"done" — the fixture wiring and the exact assertion — before implementation.
+- **Inputs:** HTTP requests to `GET /reviews` carrying an `Authorization` header. The header value
+  is either absent, a wrong scheme, or a `Bearer` token built one of four ways — by the app's own
+  `create_access_token` (valid, expired, or claimless), by `jose.jwt.encode` with a foreign secret
+  or non-whitelisted algorithm, by hand from base64 segments (`alg=none`), or by hand as a literal
+  junk string. The database-backed tests additionally insert a `User` row before the request.
+- **Outputs:** `httpx.Response` objects. Tests assert `response.status_code` (`401` for seven
+  cases, `200` for the happy path) and `response.json()["detail"]` — `"Not authenticated"` for
+  exit 1, `"Invalid authentication credentials"` for exits 2, 3 and 7.
+- **No production code changes.** No signature, no runtime behavior, no dependency is modified.
+  The diff is two test files.
 
 ### Risks & unknowns
 
-- **No `client`/app fixture exists yet** (`tests/conftest.py` has none). I'm establishing the
-  pattern; I keep it self-contained in the one test file so I don't touch shared infrastructure that
-  a reviewer might scope to another ticket.
-- **The `"Token has expired"` branch (`auth.py:44–49`) is unreachable dead code.** `decode_access_token`
-  (`core/security.py:78–86`) catches every `JWTError` — including `ExpiredSignatureError` — and returns
-  `None`, so `auth.py:35` fires first and expired tokens get the generic 401. My test must assert the
-  real behavior, not the intended-but-dead message.
-- **Interaction with issue E-04** ("Authentication middleware doesn't validate token expiry"). That
-  separate issue may make the expiry branch reachable and change the expired-token message to
-  `"Token has expired"`. If E-04 lands first, my expired-token assertion must be updated. I note this
-  explicitly rather than couple the two tickets.
-- **Fixture ownership (issue G-01).** A shared sample-user fixture is missing from `tests/fixtures/`
-  and is G-01's deliverable. Happy-path and user-not-found tests would depend on it, so I deliberately
-  keep those out of scope to avoid stepping on another ticket.
-- **Open question:** does `TestClient(app)` need `app.dependency_overrides[get_db]` for these four?
-  Reading `auth.py`, the 401s all raise before line 58, so no — but I will confirm during
-  implementation that no path reaches the DB session.
+- **Cross-event-loop `asyncpg` failures — the main technical risk, and it materialised.**
+  pytest-asyncio creates a fresh event loop per test, while `core/database.py:11` builds a
+  module-level pooled engine shared across all of them. A connection opened in one test's loop is
+  returned to the pool, outlives that loop, and then fails `pool_pre_ping` in the next test with
+  `got Future ... attached to a different loop`. Resolved by calling `await engine.dispose()` on
+  entry to both async fixtures, so every connection belongs to the current loop. Every test uses
+  `httpx.AsyncClient` over `ASGITransport` rather than a mix of sync and async clients, which keeps
+  one client and one pattern across the module.
+- **Test isolation against a real database.** `test_user` writes a row to a shared dev database and
+  must remove it on teardown, including when the test fails. A leaked row with a unique `email`
+  breaks the next run.
+- **The `"Token has expired"` branch (`auth.py:44-49`) is unreachable.** `decode_access_token`
+  (`core/security.py:78-86`) catches every `JWTError`, `ExpiredSignatureError` among them, and
+  returns `None` — so `auth.py:35` fires first and expired tokens get the generic message. The test
+  asserts observed behavior, not intended behavior.
+- **That assertion is coupled to a defect.** If the unreachable expiry branch is ever repaired so
+  that expired tokens return `"Token has expired"`, this one assertion will need updating. I am
+  pinning today's real behavior deliberately and flagging it in the PR rather than pre-empting a
+  fix that belongs in its own change.
 
 ### Edge cases
 
-At least two concrete input/state scenarios the tests must handle, all inside the four scenarios (no
-scope expansion):
+1. **Absent header vs. present-but-wrong scheme.** No `Authorization` at all and
+   `Authorization: Basic ...` both yield `401 "Not authenticated"` from `OAuth2PasswordBearer` —
+   a different code path and message from every token case.
+2. **`Bearer` with an empty token.** `Authorization: Bearer ` is **not** treated as a missing
+   credential. `get_authorization_scheme_param` splits on the space, the scheme is legitimately
+   `bearer`, and an empty string is passed on to be decoded — so it returns
+   `"Invalid authentication credentials"`, not `"Not authenticated"`.
+   *(The original plan predicted the opposite; probing the running app corrected it.)*
+3. **Structurally malformed vs. cryptographically invalid.** `not.a.jwt` and a well-formed token
+   signed with the wrong secret are different failure modes that must both be refused.
+4. **Algorithm confusion.** A token declaring `alg=none` with an empty signature — the classic JWT
+   forgery — must be rejected by the `algorithms=[HS256]` whitelist. So must a correct signature
+   made with `HS512`. `jose.encode` refuses to produce an `alg=none` token, so the test builds it
+   by hand; the library's refusal proves nothing about the application.
+5. **Expired token returns the generic message.** Asserting that exact string is what pins the
+   dead expiry branch, and what will fail loudly if that branch is ever repaired.
+6. **Valid, correctly signed token carrying no `sub` claim.** Decodes cleanly, then fails the
+   claim check — the only rejection reaching `auth.py:40-41`.
+7. **Valid token for a user absent from the database.** Signature and claims are fine; the lookup
+   returns nothing and the request is refused at `auth.py:68-69`.
+8. **Valid token for a user that exists** returns `200`. Without this case the suite cannot
+   distinguish correct rejection from blanket rejection.
 
-1. **Missing header vs. present-but-wrong scheme.** A truly absent `Authorization` header and an
-   `Authorization: Basic ...` header both yield `401 "Not authenticated"` from `OAuth2PasswordBearer`,
-   a *different* path and message than the token cases — the tests assert the correct message per path.
-2. **`Bearer` with an empty token.** `Authorization: Bearer ` (no token) must still be rejected, not
-   treated as anonymous-but-allowed.
-3. **Structurally malformed vs. cryptographically invalid.** `not.a.jwt` (bad structure) and a
-   correctly-structured token signed with the wrong secret are different failure modes that must both
-   return `401 "Invalid authentication credentials"`.
-4. **Algorithm confusion.** A token presented with `alg=none` (or a non-whitelisted algorithm) must be
-   rejected by the `algorithms=[HS256]` whitelist in `decode_access_token`, not silently accepted.
-5. **Expired token returns the generic message**, `"Invalid authentication credentials"` — asserting
-   this exact string is what proves the dead-code expiry branch and guards the E-04 boundary.
+---
+
+### Revision history
+
+**2026-08-01 — scope corrected.** The original plan covered only the four rejection paths named in
+the issue and kept happy-path and user-not-found tests out of scope on the grounds that they
+needed a shared user fixture this repo doesn't have. Two things were wrong with that:
+
+- **The suite it produced could not fail correctly.** Six passing rejection tests would all still
+  pass against a middleware that rejected every request unconditionally, valid credentials
+  included. The success path is what makes rejection tests meaningful. This is helpful as a unit test
+  but not a full integration test.
+- **The fixture was not actually blocked.** Nothing prevented a fixture local to
+  `tests/integration/` — it needed writing, not waiting on.
+
+The original plan also assumed these tests should avoid docker services, which contradicts
+`pyproject.toml:87` — the `integration` marker is defined as *"require Docker services."*
+
+Coverage was re-derived from the exits of `get_current_user` rather than from the issue's bullet
+list, taking the plan from 4 scenarios to 8 across 5 of the function's 8 exits. The three not
+covered are two unreachable branches and a database-failure path, all documented as findings in
+the PR rather than tested.
