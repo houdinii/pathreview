@@ -145,4 +145,81 @@ times. None of those failures is in a file this branch touches, and `make test-u
 `ruff` and `black` pass cleanly on both new files, and `make test-integration` reports 13 passed,
 0 skipped.
 
-**Draft PR feedback received from:** Joseph Gutierrez 
+**Draft PR feedback received from:** Joseph Gutierrez ---
+
+## Week 10 — Iteration & reflection
+
+### Reviewer feedback
+
+**Feedback received:** [ ] Yes [x] No — still awaiting review
+
+**Summary of feedback:**
+No review arrived. I opened PR #601 against `ascherj/pathreview` on August 2 and it has been open
+and marked ready for review ever since; as of August 6 it carries zero reviews and zero comments.
+Maintainer review is not part of this cohort, so this was the expected outcome rather than a sign
+the PR was overlooked.
+
+**How you responded:**
+There was nothing to respond to, so I left the PR open and ready for review rather than closing it,
+and I re-checked it immediately before submitting this entry to confirm no feedback had landed in
+the interim.
+
+---
+
+### Reflection
+
+**What was harder than you expected?**
+The scope. Issue #90 reads like four small tests, one per rejection path the issue names, and that
+is exactly how I planned it in Week 8, four skipped stubs and a deliberate decision not to touch
+the database. Once I started unpacking what those tests actually needed, that plan fell apart: a
+suite made only of rejection cases would pass against a middleware that rejected every request,
+valid credentials included, so it could not detect the failure it exists to catch. Fixing that
+meant standing up Postgres, persisting a real user, and signing a real token which was the exact work 
+I had scoped out. And it landed late in the week instead of at planning time. What surprised me is 
+that none of the difficulty lived in the code; after twenty years in the field, converting the fixtures
+to async and following that pattern through was routine. The hard part was that the true shape of
+the job only became visible after I had already committed to a smaller one.
+
+**What did you learn about working in a large codebase?**
+That it is sometimes correct to put blinders on. `make check` reports 182 pre-existing ruff errors
+on this repo and `make test-unit` reports 53 failures, and the pre-commit mypy hook fails with 44
+more across seven files in `api/` and `core/` that I never touched. It only sees them because my
+tests import `api.main`. I committed with `SKIP=mypy` so that ruff and black still ran, which is
+not something I would ever do in a project of my own. In a codebase this size the pre-existing
+problems will absorb exactly as much attention as you give them, and scoping tightly to the files
+you actually own is what keeps that from swallowing the week. I found that genuinely hard: errors
+feel wrong to me even when I know they are documented, expected, and not mine to fix.
+
+**How did AI tools help — and where did they fall short?**
+The most valuable thing AI did for me this module had almost nothing to do with writing code. I
+have executive functioning problems, so I built my own tooling, like a kickoff skill and a
+grader-simulation skill, that turns each week's rubric into a ledger of required exhibits and then
+audits the graded artifact against that ledger before I submit. That scaffolding is the bedrock of
+how I keep up. The engineering itself I can do on my own, but doing it on a deadline against a
+specific spec is where I have historically lost whole projects. Where it fell short was judgment
+about scope. The Week 8 plan to cover only the four rejection paths and skip the database was
+written with AI assistance, and it was confidently wrong. Nothing in that conversation
+flagged that a suite made entirely of rejection tests proves nothing about a middleware that
+rejects everything. It is the one point in the module where I got genuinely angry at the tool. What
+corrected it was reading the exits of `get_current_user` in `api/middleware/auth.py` myself. 
+
+**What would you do differently if you started over?**
+I would have pushed back immediately on the plan to avoid the database. I was optimizing for how
+long the work would take rather than how well it would work, and that is exactly why it ran long.
+The fixtures I skipped in Week 8 had to be written anyway in Week 9, under deadline, as
+`tests/integration/conftest.py`. Scoping to save time is what cost me the time. The second thing I
+would change came out of the feedback on my Week 9 submission, and I agree with it: my `test_user`
+fixture writes a row to a shared dev database and removes it in teardown, so a run that dies
+mid-test leaks a row that breaks the next run, where binding each test to a single connection and
+rolling back a transaction would make cleanup impossible to skip. The related point is one I would
+not have reached on my own. I treated the module-level connection pool in `core/database.py` as a
+constraint to work around, disposing the pool on fixture entry so it could survive pytest-asyncio's
+per-test event loop, when the fact that it made testing fragile was really signal about the
+production code's coupling. Next time I want to read that kind of friction as information rather
+than as an obstacle.
+
+**What are you most proud of from this module?**
+Completion. I have battled ADHD for half my life, and showing up ten weeks running through the lectures,
+issue selection, `PLAN.md`, PR #601, and now this reflection, and finishing each one before its deadline
+is not a small thing for me by any stretch of the word. The code was never the part in question, but 
+being there to write it is the fight. I fought it and won, and I want to do it again.
